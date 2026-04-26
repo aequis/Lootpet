@@ -21,6 +21,12 @@ local CONFIG = {
     -- If true, the pet loots while in a party (triggered by group kills).
     -- If false, the pet only loots when you are playing solo.
     LOOT_IN_PARTY       = true,  
+    
+    -- RARITY FILTER (Party Only)
+    -- When in a group, the pet will ONLY loot items of this quality or lower.
+    -- 0 = Poor (Grey), 1 = Normal (White), 2 = Uncommon (Green), etc.
+    -- Default 1 ensures it leaves Greens+ for the group roll.
+    MAX_QUALITY_IN_PARTY = 1,
 }
 
 -- Internal Index for Dynamic Flags (0x1 = Lootable/Sparkle)
@@ -82,15 +88,27 @@ local function HarvestLoot(eventId, delay, calls, player, victimGUID)
         loot:SetMoney(0) 
     end
 
-    -- 2. Process Items
+   -- 2. Process Items
     local items = loot:GetItems()
-    local itemsFetched = 0
     if items and #items > 0 then
         for _, itemData in ipairs(items) do
             local itemID = itemData.id 
             if itemID and itemID > 0 then
-                player:AddItem(itemID, itemData.count or 1)
-                itemsFetched = itemsFetched + 1
+                local itemTemplate = GetItemTemplate(itemID)
+                local quality = itemTemplate and itemTemplate:GetQuality() or 0
+                
+                -- Check if we should loot this item based on party status
+                local shouldLoot = true
+                if inGroup and quality > CONFIG.MAX_QUALITY_IN_PARTY then
+                    shouldLoot = false
+                end
+
+                if shouldLoot then
+                    player:AddItem(itemID, itemData.count or 1)
+                    itemsFetched = itemsFetched + 1
+                    -- Note: Ideally we'd remove the item from loot, 
+                    -- but Clear() handles the cleanup for the script's purpose.
+                end
             end
         end
     end
