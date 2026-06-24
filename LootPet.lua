@@ -10,22 +10,22 @@ local CONFIG = {
     JUNK_TO_GOLD_COMPAT = true,
 
     -- The Entry ID of the pet (34587 = Warbot).
-    TARGET_PET_ID       = 34587, 
-    
+    TARGET_PET_ID       = 34587,
+
     -- Max distance between player and corpse for pet to trigger.
-    MAX_LOOT_DISTANCE   = 60,   
-    
+    MAX_LOOT_DISTANCE   = 60,
+
     -- Distance pet must reach to "loot" the body.
     ARRIVE_DISTANCE     = 2.5,
-    
+
     -- Party Settings
     LOOT_IN_PARTY       = true,  -- If true, pet loots during group play.
-    
+
     -- RARITY FILTER (Party Only)
     -- When in a group, the pet will ONLY loot items of this quality or lower.
     -- 0 = Poor (Grey), 1 = Normal (White), 2 = Uncommon (Green), etc.
     -- Default 1 ensures it leaves Greens+ for the group roll.
-    MAX_QUALITY_IN_PARTY = 1, 
+    MAX_QUALITY_IN_PARTY = 1,
 }
 
 local DYN_FLAGS_INDEX = 0x0006 + 0x0049
@@ -37,15 +37,15 @@ local DYN_FLAGS_INDEX = 0x0006 + 0x0049
 local function HarvestLoot(eventId, delay, calls, player, victimGUID)
     local map = player:GetMap()
     if not map then return end
-    
+
     local victim = map:GetWorldObject(victimGUID)
     if not victim then player:RemoveEventById(eventId) return end
-    
+
     local unit = victim:ToUnit()
     if not unit or not unit:IsDead() then player:RemoveEventById(eventId) return end
 
     local pet = nil
-    if player:IsExistPet() then 
+    if player:IsExistPet() then
         pet = player:GetPet()
     else
         local critterGUID = player:GetCritterGUID()
@@ -55,9 +55,9 @@ local function HarvestLoot(eventId, delay, calls, player, victimGUID)
         end
     end
 
-    if not pet or player:GetDistance(unit) > CONFIG.MAX_LOOT_DISTANCE then 
-        player:RemoveEventById(eventId) 
-        return 
+    if not pet or player:GetDistance(unit) > CONFIG.MAX_LOOT_DISTANCE then
+        player:RemoveEventById(eventId)
+        return
     end
 
     if pet:GetDistance(unit) > CONFIG.ARRIVE_DISTANCE then return end
@@ -75,7 +75,7 @@ local function HarvestLoot(eventId, delay, calls, player, victimGUID)
     local copper = loot:GetMoney()
     if copper and copper > 0 then
         player:ModifyMoney(copper)
-        loot:SetMoney(0) 
+        loot:SetMoney(0)
         copperFetched = copper
     end
 
@@ -83,11 +83,11 @@ local function HarvestLoot(eventId, delay, calls, player, victimGUID)
     local items = loot:GetItems()
     if items and #items > 0 then
         for _, itemData in ipairs(items) do
-            local itemID = itemData.id 
+            local itemID = itemData.id
             if itemID and itemID > 0 then
                 local itemTemplate = GetItemTemplate(itemID)
                 local quality = itemTemplate and itemTemplate:GetQuality() or 0
-                
+
                 -- Check if we should loot this item based on party status
                 local shouldLoot = true
                 if inGroup and quality > CONFIG.MAX_QUALITY_IN_PARTY then
@@ -103,22 +103,34 @@ local function HarvestLoot(eventId, delay, calls, player, victimGUID)
                         player:AddItem(itemID, count)
                     end
                     itemsFetched = itemsFetched + 1
-                    -- Note: Ideally we'd remove the item from loot, 
+                    -- Note: Ideally we'd remove the item from loot,
                     -- but Clear() handles the cleanup for the script's purpose.
                 end
             end
         end
     end
 
-    -- 3. Cleanup: Only clear if we actually emptied the whole thing
+    -- Process Quest Items (e.g., Red Burlap Bandana)
+    local questItems = loot:GetQuestItems()
+    if questItems and #questItems > 0 then
+        for _, itemData in ipairs(questItems) do
+            local itemID = itemData.id
+            if itemID and itemID > 0 then
+                player:AddItem(itemID, itemData.count or 1)
+                itemsFetched = itemsFetched + 1
+            end
+        end
+    end
+
+    -- Cleanup: Only clear if we actually emptied the whole thing
     -- If items are left (Greens/Blues), we don't clear so players can roll.
-    local totalItemsInLoot = #items
+    local totalItemsInLoot = (items and #items or 0) + (questItems and #questItems or 0)
     if itemsFetched == totalItemsInLoot and itemsFetched > 0 or (copperFetched > 0 and totalItemsInLoot == 0) then
         loot:Clear()
-        unit:SetUInt32Value(DYN_FLAGS_INDEX, 0) 
+        unit:SetUInt32Value(DYN_FLAGS_INDEX, 0)
         unit:AllLootRemovedFromCorpse()
     end
-    
+
     pet:MoveFollow(player)
 end
 
@@ -137,7 +149,7 @@ local function OnGiveXP(event, player, amount, victim)
         local p = player:GetPet()
         if p and p:GetEntry() == CONFIG.TARGET_PET_ID then pet = p hasTargetPet = true end
     end
-    
+
     if not hasTargetPet then
         local critterGUID = player:GetCritterGUID()
         if critterGUID ~= 0 then
@@ -152,12 +164,12 @@ local function OnGiveXP(event, player, amount, victim)
     if hasTargetPet and pet then
         pet:MoveTo(1, victim:GetX(), victim:GetY(), victim:GetZ())
         local vGUID = victim:GetGUID()
-        player:RegisterEvent(function(eventId, delay, calls, p) 
-            HarvestLoot(eventId, delay, calls, p, vGUID) 
+        player:RegisterEvent(function(eventId, delay, calls, p)
+            HarvestLoot(eventId, delay, calls, p, vGUID)
         end, 200, 0)
     end
 end
 
-RegisterPlayerEvent(12, OnGiveXP) 
+RegisterPlayerEvent(12, OnGiveXP)
 
 print(">> Auto-Loot Companion: Warbot 'Fair Play' Edition Loaded.")
