@@ -6,6 +6,9 @@
 -- ============================================================================
 
 local CONFIG = {
+    -- mirror mod-junk-to-gold for Lua pet-looted grey items.
+    JUNK_TO_GOLD_COMPAT = true,
+
     -- The Entry ID of the pet (34587 = Warbot).
     TARGET_PET_ID       = 34587, 
     
@@ -92,7 +95,13 @@ local function HarvestLoot(eventId, delay, calls, player, victimGUID)
                 end
 
                 if shouldLoot then
-                    player:AddItem(itemID, itemData.count or 1)
+                    local count = itemData.count or 1
+                    if CONFIG.JUNK_TO_GOLD_COMPAT and quality == 0 then
+                        local sellPrice = itemTemplate and itemTemplate:GetSellPrice() or 0
+                        player:ModifyMoney(sellPrice * count)
+                    else
+                        player:AddItem(itemID, count)
+                    end
                     itemsFetched = itemsFetched + 1
                     -- Note: Ideally we'd remove the item from loot, 
                     -- but Clear() handles the cleanup for the script's purpose.
