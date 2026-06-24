@@ -25,7 +25,7 @@ local CONFIG = {
     MAX_QUALITY_IN_PARTY = 1, 
 }
 
-local DYN_FLAGS_INDEX = 0x0006 + 0x0020
+local DYN_FLAGS_INDEX = 0x0006 + 0x0049
 
 -- ============================================================================
 -- THE HARVEST ENGINE
