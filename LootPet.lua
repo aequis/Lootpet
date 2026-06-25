@@ -138,7 +138,7 @@ end
 -- DETECTION HOOK
 -- ============================================================================
 
-local function OnGiveXP(event, player, amount, victim)
+local function OnKillCreature(event, player, victim)
     if not victim or not player then return end
     if not CONFIG.LOOT_IN_PARTY and player:IsInGroup() then return end
 
@@ -170,6 +170,6 @@ local function OnGiveXP(event, player, amount, victim)
     end
 end
 
-RegisterPlayerEvent(12, OnGiveXP)
+RegisterPlayerEvent(7, OnKillCreature)
 
 print(">> Auto-Loot Companion: Warbot 'Fair Play' Edition Loaded.")
