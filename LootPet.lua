@@ -29,39 +29,106 @@ local CONFIG = {
 }
 
 local DYN_FLAGS_INDEX = 0x0006 + 0x0049
+local pendingHarvests = {}
+
+local function IsWorldObject(obj)
+    return obj and type(obj) == "userdata" and pcall(obj.GetGUID, obj)
+end
+
+local function HarvestKey(player, victim)
+    return tostring(player:GetGUID()) .. ":" .. tostring(victim:GetGUID())
+end
+
+local function GetTargetPet(player)
+    local map = player:GetMap()
+    if not map then return nil end
+
+    if player:IsExistPet() then
+        local pet = player:GetPet()
+        if pet and pet:GetEntry() == CONFIG.TARGET_PET_ID then return pet end
+    end
+
+    local critterGUID = player:GetCritterGUID()
+    if critterGUID ~= 0 then
+        local obj = map:GetWorldObject(critterGUID)
+        if obj then
+            local pet = obj:ToUnit()
+            if pet and pet:GetEntry() == CONFIG.TARGET_PET_ID then return pet end
+        end
+    end
+
+    return nil
+end
+
+local function CountLootEntries(loot)
+    local items = loot:GetItems()
+    local questItems = loot:GetQuestItems()
+    return (items and #items or 0) + (questItems and #questItems or 0)
+end
+
+local function ResolveLootingPlayer(killer, victim)
+    if not IsWorldObject(killer) or not IsWorldObject(victim) then return nil end
+    if GetTargetPet(killer) then return killer end
+    if not killer:IsInGroup() then return nil end
+
+    local group = killer:GetGroup()
+    if not group then return nil end
+
+    local members = group:GetMembers()
+    if not members then return nil end
+
+    for _, member in ipairs(members) do
+        if member and not member:IsBot() and member:IsAtGroupRewardDistance(victim) and GetTargetPet(member) then
+            return member
+        end
+    end
+
+    for _, member in ipairs(members) do
+        if member and member:IsAtGroupRewardDistance(victim) and GetTargetPet(member) then
+            return member
+        end
+    end
+
+    return nil
+end
 
 -- ============================================================================
 -- THE HARVEST ENGINE
 -- ============================================================================
 
-local function HarvestLoot(eventId, delay, calls, player, victimGUID)
+local function HarvestLoot(eventId, delay, calls, player, victimGUID, harvestKey)
     local map = player:GetMap()
-    if not map then return end
-
-    local victim = map:GetWorldObject(victimGUID)
-    if not victim then player:RemoveEventById(eventId) return end
-
-    local unit = victim:ToUnit()
-    if not unit or not unit:IsDead() then player:RemoveEventById(eventId) return end
-
-    local pet = nil
-    if player:IsExistPet() then
-        pet = player:GetPet()
-    else
-        local critterGUID = player:GetCritterGUID()
-        if critterGUID ~= 0 then
-            local obj = map:GetWorldObject(critterGUID)
-            if obj then pet = obj:ToUnit() end
-        end
+    if not map then
+        pendingHarvests[harvestKey] = nil
+        player:RemoveEventById(eventId)
+        return
     end
 
+    local victim = map:GetWorldObject(victimGUID)
+    if not victim then
+        pendingHarvests[harvestKey] = nil
+        player:RemoveEventById(eventId)
+        return
+    end
+
+    local unit = victim:ToUnit()
+    if not unit or not unit:IsDead() then
+        pendingHarvests[harvestKey] = nil
+        player:RemoveEventById(eventId)
+        return
+    end
+
+    local pet = GetTargetPet(player)
+
     if not pet or player:GetDistance(unit) > CONFIG.MAX_LOOT_DISTANCE then
+        pendingHarvests[harvestKey] = nil
         player:RemoveEventById(eventId)
         return
     end
 
     if pet:GetDistance(unit) > CONFIG.ARRIVE_DISTANCE then return end
 
+    pendingHarvests[harvestKey] = nil
     player:RemoveEventById(eventId)
 
     local loot = unit:GetLoot()
@@ -96,15 +163,19 @@ local function HarvestLoot(eventId, delay, calls, player, victimGUID)
 
                 if shouldLoot then
                     local count = itemData.count or 1
+                    local looted = false
                     if CONFIG.JUNK_TO_GOLD_COMPAT and quality == 0 then
                         local sellPrice = itemTemplate and itemTemplate:GetSellPrice() or 0
                         player:ModifyMoney(sellPrice * count)
+                        looted = true
                     else
-                        player:AddItem(itemID, count)
+                        looted = player:AddItem(itemID, count) ~= nil
                     end
-                    itemsFetched = itemsFetched + 1
-                    -- Note: Ideally we'd remove the item from loot,
-                    -- but Clear() handles the cleanup for the script's purpose.
+
+                    if looted then
+                        loot:RemoveItem(itemID, true, count)
+                        itemsFetched = itemsFetched + 1
+                    end
                 end
             end
         end
@@ -116,16 +187,23 @@ local function HarvestLoot(eventId, delay, calls, player, victimGUID)
         for _, itemData in ipairs(questItems) do
             local itemID = itemData.id
             if itemID and itemID > 0 then
-                player:AddItem(itemID, itemData.count or 1)
-                itemsFetched = itemsFetched + 1
+                local count = itemData.count or 1
+                if player:AddItem(itemID, count) ~= nil then
+                    loot:RemoveItem(itemID, true, count)
+                    itemsFetched = itemsFetched + 1
+                end
             end
         end
     end
 
-    -- Cleanup: Only clear if we actually emptied the whole thing
-    -- If items are left (Greens/Blues), we don't clear so players can roll.
-    local totalItemsInLoot = (items and #items or 0) + (questItems and #questItems or 0)
-    if itemsFetched == totalItemsInLoot and itemsFetched > 0 or (copperFetched > 0 and totalItemsInLoot == 0) then
+    if itemsFetched > 0 then
+        loot:UpdateItemIndex()
+        loot:SetUnlootedCount(CountLootEntries(loot))
+    end
+
+    -- Cleanup only when the pet removed every remaining item. Higher-quality
+    -- party loot stays on the corpse for normal group rolling/manual looting.
+    if loot:IsLooted() or loot:IsEmpty() then
         loot:Clear()
         unit:SetUInt32Value(DYN_FLAGS_INDEX, 0)
         unit:AllLootRemovedFromCorpse()
@@ -138,38 +216,38 @@ end
 -- DETECTION HOOK
 -- ============================================================================
 
-local function OnKillCreature(event, player, victim)
+local function QueueHarvest(player, victim)
     if not victim or not player then return end
+    if not IsWorldObject(player) or not IsWorldObject(victim) then return end
     if not CONFIG.LOOT_IN_PARTY and player:IsInGroup() then return end
 
-    local pet = nil
-    local hasTargetPet = false
+    local lootingPlayer = ResolveLootingPlayer(player, victim)
+    if not lootingPlayer then return end
 
-    if player:IsExistPet() then
-        local p = player:GetPet()
-        if p and p:GetEntry() == CONFIG.TARGET_PET_ID then pet = p hasTargetPet = true end
-    end
+    local pet = GetTargetPet(lootingPlayer)
+    if not pet then return end
 
-    if not hasTargetPet then
-        local critterGUID = player:GetCritterGUID()
-        if critterGUID ~= 0 then
-            local obj = player:GetMap():GetWorldObject(critterGUID)
-            if obj then
-                local u = obj:ToUnit()
-                if u and u:GetEntry() == CONFIG.TARGET_PET_ID then pet = u hasTargetPet = true end
-            end
-        end
-    end
+    local key = HarvestKey(lootingPlayer, victim)
+    if pendingHarvests[key] then return end
+    pendingHarvests[key] = true
 
-    if hasTargetPet and pet then
-        pet:MoveTo(1, victim:GetX(), victim:GetY(), victim:GetZ())
-        local vGUID = victim:GetGUID()
-        player:RegisterEvent(function(eventId, delay, calls, p)
-            HarvestLoot(eventId, delay, calls, p, vGUID)
-        end, 200, 0)
-    end
+    pet:MoveTo(1, victim:GetX(), victim:GetY(), victim:GetZ())
+    local vGUID = victim:GetGUID()
+    lootingPlayer:RegisterEvent(function(eventId, delay, calls, p)
+        HarvestLoot(eventId, delay, calls, p, vGUID, key)
+    end, 200, 0)
+end
+
+local function OnKillCreature(event, player, victim)
+    QueueHarvest(player, victim)
+end
+
+local function OnGiveXP(event, player, amount, victim)
+    QueueHarvest(player, victim)
+    return amount
 end
 
 RegisterPlayerEvent(7, OnKillCreature)
+RegisterPlayerEvent(12, OnGiveXP)
 
 print(">> Auto-Loot Companion: Warbot 'Fair Play' Edition Loaded.")
