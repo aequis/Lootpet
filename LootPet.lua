@@ -9,6 +9,9 @@ local CONFIG = {
     -- mirror mod-junk-to-gold for Lua pet-looted grey items.
     JUNK_TO_GOLD_COMPAT = true,
 
+    -- Mirror mod-quest-loot-party for pet-looted normal-quality quest items.
+    QUEST_LOOT_PARTY_COMPAT = true,
+
     -- The Entry ID of the pet (34587 = Warbot).
     TARGET_PET_ID       = 34587,
 
@@ -29,7 +32,9 @@ local CONFIG = {
 }
 
 local DYN_FLAGS_INDEX = 0x0006 + 0x0049
+local QUEST_STATUS_INCOMPLETE = 3
 local pendingHarvests = {}
+local questItemRequirements = {}
 
 local function IsWorldObject(obj)
     return obj and type(obj) == "userdata" and pcall(obj.GetGUID, obj)
@@ -64,6 +69,92 @@ local function CountLootEntries(loot)
     local items = loot:GetItems()
     local questItems = loot:GetQuestItems()
     return (items and #items or 0) + (questItems and #questItems or 0)
+end
+
+local function GetQuestRequirementsForItem(itemID)
+    if questItemRequirements[itemID] ~= nil then
+        return questItemRequirements[itemID]
+    end
+
+    local requirements = {}
+    local query = WorldDBQuery(string.format([[
+        SELECT
+            `ID`,
+            CASE
+                WHEN `RequiredItemId1` = %d THEN `RequiredItemCount1`
+                WHEN `RequiredItemId2` = %d THEN `RequiredItemCount2`
+                WHEN `RequiredItemId3` = %d THEN `RequiredItemCount3`
+                WHEN `RequiredItemId4` = %d THEN `RequiredItemCount4`
+                WHEN `RequiredItemId5` = %d THEN `RequiredItemCount5`
+                WHEN `RequiredItemId6` = %d THEN `RequiredItemCount6`
+                ELSE 0
+            END
+        FROM `quest_template`
+        WHERE `RequiredItemId1` = %d
+           OR `RequiredItemId2` = %d
+           OR `RequiredItemId3` = %d
+           OR `RequiredItemId4` = %d
+           OR `RequiredItemId5` = %d
+           OR `RequiredItemId6` = %d
+    ]], itemID, itemID, itemID, itemID, itemID, itemID,
+        itemID, itemID, itemID, itemID, itemID, itemID))
+
+    if query then
+        repeat
+            local questID = query:GetUInt32(0)
+            local requiredCount = query:GetUInt32(1)
+            if questID and questID > 0 and requiredCount and requiredCount > 0 then
+                requirements[#requirements + 1] = { questID = questID, requiredCount = requiredCount }
+            end
+        until not query:NextRow()
+    end
+
+    questItemRequirements[itemID] = requirements
+    return requirements
+end
+
+local function GetNeededQuestItemCount(player, itemID, count)
+    local requirements = GetQuestRequirementsForItem(itemID)
+    if not requirements or #requirements == 0 then return 0 end
+
+    local currentCount = player:GetItemCount(itemID, true)
+    local neededCount = 0
+
+    for _, requirement in ipairs(requirements) do
+        if player:GetQuestStatus(requirement.questID) == QUEST_STATUS_INCOMPLETE then
+            local missingCount = requirement.requiredCount - currentCount
+            if missingCount > neededCount then
+                neededCount = missingCount
+            end
+        end
+    end
+
+    if neededCount <= 0 then return 0 end
+    if count and count > 0 and neededCount > count then return count end
+    return neededCount
+end
+
+local function GetEligibleQuestLootPartyMembers(player, victim, itemID, count)
+    local members = {}
+    if not player:IsInGroup() then return members end
+    local playerGUID = tostring(player:GetGUID())
+
+    local group = player:GetGroup()
+    if not group then return members end
+
+    local groupMembers = group:GetMembers()
+    if not groupMembers then return members end
+
+    for _, member in ipairs(groupMembers) do
+        if member and tostring(member:GetGUID()) ~= playerGUID and member:IsAtGroupRewardDistance(victim) then
+            local neededCount = GetNeededQuestItemCount(member, itemID, count)
+            if neededCount > 0 then
+                members[#members + 1] = { player = member, count = neededCount }
+            end
+        end
+    end
+
+    return members
 end
 
 local function ResolveLootingPlayer(killer, victim)
@@ -188,7 +279,19 @@ local function HarvestLoot(eventId, delay, calls, player, victimGUID, harvestKey
             local itemID = itemData.id
             if itemID and itemID > 0 then
                 local count = itemData.count or 1
+                local itemTemplate = GetItemTemplate(itemID)
+                local quality = itemTemplate and itemTemplate:GetQuality() or 0
+                local partyMembers = {}
+
+                if CONFIG.QUEST_LOOT_PARTY_COMPAT and inGroup and quality == 1 then
+                    partyMembers = GetEligibleQuestLootPartyMembers(player, unit, itemID, count)
+                end
+
                 if player:AddItem(itemID, count) ~= nil then
+                    for _, memberData in ipairs(partyMembers) do
+                        memberData.player:AddItem(itemID, memberData.count)
+                    end
+
                     loot:RemoveItem(itemID, true, count)
                     itemsFetched = itemsFetched + 1
                 end
