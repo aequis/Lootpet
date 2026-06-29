@@ -287,11 +287,20 @@ local function HarvestLoot(eventId, delay, calls, player, victimGUID, harvestKey
                     partyMembers = GetEligibleQuestLootPartyMembers(player, unit, itemID, count)
                 end
 
-                if player:AddItem(itemID, count) ~= nil then
-                    for _, memberData in ipairs(partyMembers) do
-                        memberData.player:AddItem(itemID, memberData.count)
-                    end
+                local playerNeededCount = GetNeededQuestItemCount(player, itemID, count)
+                local looted = false
 
+                if playerNeededCount > 0 and player:AddItem(itemID, playerNeededCount) ~= nil then
+                    looted = true
+                end
+
+                for _, memberData in ipairs(partyMembers) do
+                    if memberData.player:AddItem(itemID, memberData.count) ~= nil then
+                        looted = true
+                    end
+                end
+
+                if looted then
                     loot:RemoveItem(itemID, true, count)
                     itemsFetched = itemsFetched + 1
                 end
